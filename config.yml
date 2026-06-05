@@ -1,0 +1,32 @@
+confluence:
+  url: https://tractorjunction1.atlassian.net/wiki
+  space_key: Roshan
+  hub_parent_title: Sprint Governance Hub
+
+jira:
+  url: https://tractorjunction1.atlassian.net
+  boards:
+    primary:
+      id: 49
+      name: CMP board
+  projects:
+    - DPC
+    - FJPL
+  ticket_filters:
+    jql: >
+      (summary ~ "TJ | Web |" OR summary ~ "TG | Web |" OR labels = TJ_WEB)
+      AND issuetype != Sub-task
+  fields:
+    story_points: customfield_10061
+    team_labels:
+      - UI
+      - DEV
+      - QA
+      - SEO
+  done_statuses:
+    - Live
+    - CLOSED
+    - Ready For Live
+    - Live Verification QA
+    - Live Verification PM & SEO
+  adhoc_label: AdHoc
