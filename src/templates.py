@@ -23,24 +23,33 @@ def _status_class(status: str) -> str:
     return "status-default"
 
 
-def build_sprint_dashboard(sprint: Sprint, report: SprintReport) -> str:
+def _ticket_link(key: str, jira_url: str) -> str:
+    href = f"{jira_url}/browse/{key}"
+    return f'<a href="{href}" target="_blank">{_escape(key)}</a>'
+
+
+def build_sprint_dashboard(
+    sprint: Sprint, report: SprintReport, jira_url: str
+) -> str:
     lines = [_sprint_info(sprint), _health_dashboard(report)]
-    lines.append(_delivery_tracker(report.tickets))
+    lines.append(_delivery_tracker(report.tickets, jira_url))
     if report.adhoc_tickets:
-        lines.append(_adhoc_table(report.adhoc_tickets, report.adhoc_sp))
+        lines.append(_adhoc_table(report.adhoc_tickets, jira_url))
     if report.team_metrics:
         lines.append(_team_summary(report))
     if report.assignee_metrics:
         lines.append(_assignee_summary(report))
     if report.carry_forward:
-        lines.append(_carry_forward_table(report.carry_forward))
+        lines.append(_carry_forward_table(report.carry_forward, jira_url))
     if report.overdue:
-        lines.append(_overdue_table(report.overdue))
+        lines.append(_overdue_table(report.overdue, jira_url))
     lines.append(_grooming_section())
     return "\n".join(lines)
 
 
-def build_closure_report(sprint: Sprint, report: SprintReport) -> str:
+def build_closure_report(
+    sprint: Sprint, report: SprintReport, jira_url: str
+) -> str:
     lines = [
         f"<h1>Sprint Closure: {_escape(sprint.name)}</h1>",
         _sprint_info(sprint),
@@ -48,35 +57,36 @@ def build_closure_report(sprint: Sprint, report: SprintReport) -> str:
         _team_summary(report),
     ]
     if report.adhoc_tickets:
-        lines.append(_adhoc_table(report.adhoc_tickets, report.adhoc_sp))
+        lines.append(_adhoc_table(report.adhoc_tickets, jira_url))
     if report.carry_forward:
-        lines.append(_carry_forward_table(report.carry_forward))
+        lines.append(_carry_forward_table(report.carry_forward, jira_url))
     if report.overdue:
-        lines.append(_overdue_table(report.overdue))
+        lines.append(_overdue_table(report.overdue, jira_url))
     lines.append(_rovo_section(sprint))
     return "\n".join(lines)
 
 
-def build_performance_history(history: List[dict]) -> str:
+def build_performance_current(report: SprintReport, jira_url: str) -> str:
     rows = [
-        "<table>",
-        "<tr>"
-        "<th>Sprint</th><th>Planned SP</th><th>Delivered SP</th>"
-        "<th>Ad-hoc SP</th><th>Carry Forward SP</th><th>Delivery %</th>"
-        "</tr>",
+        "<h1>Current Sprint Performance</h1>"
+        f"<p>Sprint: <strong>{_escape(report.sprint.name)}</strong></p>",
+        "<table>"
+        "<tr><th>Assignee</th><th>Planned SP</th><th>Delivered SP</th></tr>",
     ]
-    for h in history:
+    for am in sorted(
+        report.assignee_metrics.values(), key=lambda x: x.assignee
+    ):
         rows.append(
             "<tr>"
-            f"<td>{_escape(h['sprint'])}</td>"
-            f"<td>{h['planned_sp']}</td>"
-            f"<td>{h['delivered_sp']}</td>"
-            f"<td>{h['adhoc_sp']}</td>"
-            f"<td>{h['carry_forward_sp']}</td>"
-            f"<td>{h['delivery_pct']}%</td>"
+            f"<td>{_escape(am.assignee)}</td>"
+            f"<td>{am.planned_sp:.1f}</td>"
+            f"<td>{am.delivered_sp:.1f}</td>"
             "</tr>"
         )
-    rows.append("</table>")
+    rows.append(
+        "</table>"
+        "<p><em>Note: This data is for sprint governance and delivery tracking only.</em></p>"
+    )
     return "\n".join(rows)
 
 
@@ -142,7 +152,7 @@ def _health_dashboard(report: SprintReport) -> str:
     )
 
 
-def _delivery_tracker(tickets: List[Ticket]) -> str:
+def _delivery_tracker(tickets: List[Ticket], jira_url: str) -> str:
     rows = [
         "<h2>Sprint Delivery Tracker</h2>"
         "<table>"
@@ -156,7 +166,7 @@ def _delivery_tracker(tickets: List[Ticket]) -> str:
         team_str = ", ".join(t.teams) if t.teams else "—"
         rows.append(
             "<tr>"
-            f"<td>{_escape(t.key)}</td>"
+            f"<td>{_ticket_link(t.key, jira_url)}</td>"
             f"<td>{_escape(t.summary)}</td>"
             f"<td>{_escape(t.platform)}</td>"
             f"<td>{_escape(team_str)}</td>"
@@ -170,10 +180,10 @@ def _delivery_tracker(tickets: List[Ticket]) -> str:
     return "\n".join(rows)
 
 
-def _adhoc_table(tickets: List[Ticket], total_sp: float) -> str:
+def _adhoc_table(tickets: List[Ticket], jira_url: str) -> str:
     rows = [
         "<h2>Ad-hoc Work</h2>"
-        f"<p>Total Ad-hoc SP: {total_sp:.1f}</p>"
+        f"<p>Total Ad-hoc SP: {sum(t.story_points for t in tickets):.1f}</p>"
         "<table>"
         "<tr><th>Key</th><th>Summary</th><th>Team</th>"
         "<th>Assignee</th><th>SP</th><th>Added</th></tr>"
@@ -183,7 +193,7 @@ def _adhoc_table(tickets: List[Ticket], total_sp: float) -> str:
         team_str = ", ".join(t.teams) if t.teams else "—"
         rows.append(
             "<tr>"
-            f"<td>{_escape(t.key)}</td>"
+            f"<td>{_ticket_link(t.key, jira_url)}</td>"
             f"<td>{_escape(t.summary)}</td>"
             f"<td>{_escape(team_str)}</td>"
             f"<td>{_escape(t.assignee or 'Unassigned')}</td>"
@@ -236,12 +246,14 @@ def _assignee_summary(report: SprintReport) -> str:
             f"<td>{am.pending_sp:.1f}</td>"
             "</tr>"
         )
-    rows.append("</table>"
-                "<p><em>Note: This data is for sprint governance and delivery tracking only.</em></p>")
+    rows.append(
+        "</table>"
+        "<p><em>Note: This data is for sprint governance and delivery tracking only.</em></p>"
+    )
     return "\n".join(rows)
 
 
-def _carry_forward_table(tickets: List[Ticket]) -> str:
+def _carry_forward_table(tickets: List[Ticket], jira_url: str) -> str:
     rows = [
         "<h2>Carry Forward</h2>"
         "<table>"
@@ -250,7 +262,7 @@ def _carry_forward_table(tickets: List[Ticket]) -> str:
     for t in tickets:
         rows.append(
             "<tr>"
-            f"<td>{_escape(t.key)}</td>"
+            f"<td>{_ticket_link(t.key, jira_url)}</td>"
             f"<td>{_escape(t.assignee or 'Unassigned')}</td>"
             f"<td>{t.story_points:.1f}</td>"
             f"<td>{_escape(t.status)}</td>"
@@ -260,7 +272,7 @@ def _carry_forward_table(tickets: List[Ticket]) -> str:
     return "\n".join(rows)
 
 
-def _overdue_table(tickets: List[Ticket]) -> str:
+def _overdue_table(tickets: List[Ticket], jira_url: str) -> str:
     rows = [
         "<h2>Overdue Tickets</h2>"
         "<table>"
@@ -270,7 +282,7 @@ def _overdue_table(tickets: List[Ticket]) -> str:
         due = t.due_date.strftime("%b %d, %Y") if t.due_date else "—"
         rows.append(
             "<tr>"
-            f"<td>{_escape(t.key)}</td>"
+            f"<td>{_ticket_link(t.key, jira_url)}</td>"
             f"<td>{_escape(t.assignee or 'Unassigned')}</td>"
             f"<td>{t.story_points:.1f}</td>"
             f"<td>{due}</td>"

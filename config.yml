@@ -15,7 +15,6 @@ jira:
   ticket_filters:
     jql: >
       (summary ~ "TJ | Web |" OR summary ~ "TG | Web |" OR labels = TJ_WEB)
-      AND issuetype != Sub-task
   fields:
     story_points: customfield_10061
     team_labels:

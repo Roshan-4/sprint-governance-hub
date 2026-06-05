@@ -8,17 +8,11 @@ from atlassian import Jira
 from src.config import AppConfig
 from src.models import Sprint, SprintState, Ticket
 
-PIPE_ESCAPED = "ESCAPED_PIPE_12345"
 TJ_PATTERN = re.compile(r"TJ\s*\|\s*Web\s*\|", re.IGNORECASE)
 TG_PATTERN = re.compile(r"TG\s*\|\s*Web\s*\|", re.IGNORECASE)
-
-
-def _jql_escape_pipe(phrase: str) -> str:
-    return phrase.replace("|", PIPE_ESCAPED)
-
-
-def _jql_unescape_pipe(phrase: str) -> str:
-    return phrase.replace(PIPE_ESCAPED, "|")
+PARENT_TYPES = {"Task", "Story", "Bug", "Improvement", "Production Bug"}
+EPIC_TYPE = "Epic"
+SUBTASK_TYPE = "Sub-task"
 
 
 def _detect_platform(summary: str, labels: List[str]) -> str:
@@ -77,20 +71,59 @@ class JiraClient:
             "issuetype",
             "parent",
         ]
+
+        all_issues = self._jql_search(jql, fields)
+
+        parents = {}
+        subtask_map = {}
+
+        for issue in all_issues:
+            key = issue["key"]
+            fields_data = issue["fields"]
+            itype = fields_data["issuetype"]["name"]
+
+            if itype == EPIC_TYPE:
+                continue
+
+            if itype == SUBTASK_TYPE:
+                parent_raw = fields_data.get("parent")
+                parent_key = parent_raw["key"] if parent_raw else None
+                if parent_key:
+                    subtask_map.setdefault(parent_key, []).append(issue)
+                continue
+
+            if itype in PARENT_TYPES:
+                parents[key] = issue
+
+        team_labels = set(self.config.jira.fields["team_labels"])
         tickets = []
-        start = 0
-        while True:
-            result = self.jira.jql(jql, fields=fields, start=start, limit=100)
-            issues = result.get("issues", [])
-            if not issues:
-                break
-            for issue in issues:
-                ticket = self._parse_ticket(issue)
-                if ticket:
-                    tickets.append(ticket)
-            if len(issues) < 100:
-                break
-            start += 100
+        for parent_key, parent_issue in parents.items():
+            f = parent_issue["fields"]
+            sp_field = self.config.jira.fields["story_points"]
+            parent_sp = float(f.get(sp_field) or 0)
+            parent_summary = f.get("summary", "")
+            parent_labels = f.get("labels", [])
+
+            sub_issues = subtask_map.get(parent_key, [])
+            sub_sp = 0.0
+            sub_teams = set()
+            sub_labels = []
+            for si in sub_issues:
+                sf = si["fields"]
+                sub_sp += float(sf.get(sp_field) or 0)
+                sub_labels.extend(sf.get("labels", []))
+                for label in sf.get("labels", []):
+                    if label in team_labels:
+                        sub_teams.add(label)
+
+            ticket = self._parse_ticket(
+                parent_issue,
+                story_points_override=sub_sp,
+                teams_override=sorted(sub_teams),
+            )
+            if ticket:
+                tickets.append(ticket)
+
         return tickets
 
     def get_board_sprints(self, board_id: int, state: str = None) -> List[Sprint]:
@@ -116,9 +149,10 @@ class JiraClient:
     def get_sprint_history(self, max_sprints: int = 50) -> List[Sprint]:
         all_sprints = []
         start = 0
+        board_id = self.config.jira.primary_board.id
         while True:
             result = self.jira.get_all_sprints_from_board(
-                board_id=self.config.jira.primary_board.id,
+                board_id=board_id,
                 state="closed",
                 start=start,
                 limit=50,
@@ -127,7 +161,7 @@ class JiraClient:
             if not values:
                 break
             for s in values:
-                if s.get("originBoardId") == self.config.jira.primary_board.id:
+                if s.get("originBoardId") == board_id:
                     all_sprints.append(
                         Sprint(
                             id=s["id"],
@@ -146,25 +180,84 @@ class JiraClient:
                 break
         return all_sprints
 
-    def get_subtasks_team_labels(self, parent_key: str) -> List[str]:
-        jql = f'parent = {parent_key} AND issuetype = Sub-task'
-        fields = ["labels", "summary"]
-        result = self.jira.jql(jql, fields=fields, limit=50)
-        teams = set()
-        team_labels = set(self.config.jira.fields["team_labels"])
-        for issue in result.get("issues", []):
-            labels = issue.get("fields", {}).get("labels", [])
-            for label in labels:
-                if label in team_labels:
-                    teams.add(label)
-        return sorted(teams)
+    def get_history_sprint_issues(self, sprint_id: int) -> List[Ticket]:
+        jql = (
+            f'sprint = {sprint_id} AND '
+            f'({self.config.jira.ticket_filters["jql"]})'
+        )
+        fields = [
+            "summary",
+            self.config.jira.fields["story_points"],
+            "assignee",
+            "status",
+            "labels",
+            "created",
+            "duedate",
+            "issuetype",
+            "parent",
+        ]
+        all_issues = self._jql_search(jql, fields)
+        parents = {}
+        subtask_map = {}
 
-    def _parse_ticket(self, issue: dict) -> Optional[Ticket]:
+        for issue in all_issues:
+            itype = issue["fields"]["issuetype"]["name"]
+            if itype == EPIC_TYPE:
+                continue
+            if itype == SUBTASK_TYPE:
+                parent_raw = issue["fields"].get("parent")
+                parent_key = parent_raw["key"] if parent_raw else None
+                if parent_key:
+                    subtask_map.setdefault(parent_key, []).append(issue)
+                continue
+            if itype in PARENT_TYPES:
+                parents[issue["key"]] = issue
+
+        tickets = []
+        for parent_key, parent_issue in parents.items():
+            f = parent_issue["fields"]
+            sp_field = self.config.jira.fields["story_points"]
+            sub_issues = subtask_map.get(parent_key, [])
+            sub_sp = sum(
+                float(si["fields"].get(sp_field) or 0) for si in sub_issues
+            )
+            ticket = self._parse_ticket(
+                parent_issue, story_points_override=sub_sp
+            )
+            if ticket:
+                tickets.append(ticket)
+        return tickets
+
+    def _jql_search(self, jql: str, fields: List[str]) -> list:
+        issues = []
+        next_token = None
+        while True:
+            result = self.jira.enhanced_jql(
+                jql, fields=fields, nextPageToken=next_token, limit=100
+            )
+            chunk = result.get("issues", [])
+            if not chunk:
+                break
+            issues.extend(chunk)
+            next_token = result.get("nextPageToken")
+            if not next_token:
+                break
+        return issues
+
+    def _parse_ticket(
+        self,
+        issue: dict,
+        story_points_override: Optional[float] = None,
+        teams_override: Optional[List[str]] = None,
+    ) -> Optional[Ticket]:
         fields = issue.get("fields", {})
         key = issue.get("key", "")
         summary = fields.get("summary", "")
-        sp_field = self.config.jira.fields["story_points"]
-        story_points = float(fields.get(sp_field) or 0)
+        story_points = (
+            story_points_override
+            if story_points_override is not None
+            else float(fields.get(self.config.jira.fields["story_points"]) or 0)
+        )
         assignee_raw = fields.get("assignee")
         assignee = assignee_raw.get("displayName") if assignee_raw else None
         status = fields.get("status", {}).get("name", "Unknown")
@@ -172,7 +265,7 @@ class JiraClient:
         created = self._parse_date(fields.get("created"))
         due_date = self._parse_date(fields.get("duedate"))
         issuetype = fields.get("issuetype", {}).get("name", "")
-        is_subtask = issuetype == "Sub-task"
+        is_subtask = issuetype == SUBTASK_TYPE
         parent_raw = fields.get("parent")
         parent_key = parent_raw.get("key") if parent_raw else None
         platform = _detect_platform(summary, labels)
@@ -189,7 +282,7 @@ class JiraClient:
             due_date=due_date,
             is_subtask=is_subtask,
             parent_key=parent_key,
-            teams=[],
+            teams=teams_override or [],
         )
 
     @staticmethod
