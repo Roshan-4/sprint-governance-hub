@@ -28,6 +28,10 @@ class SheetsClient:
         self.spreadsheet = None
 
     def open_or_create(self, title: str):
+        sheet_id = self.config.sheets.spreadsheet_id
+        if sheet_id:
+            self.spreadsheet = self.client.open_by_key(sheet_id)
+            return "opened"
         try:
             self.spreadsheet = self.client.open(title)
             return "opened"

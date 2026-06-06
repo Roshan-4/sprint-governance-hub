@@ -17,6 +17,7 @@ class BoardConfig(BaseModel):
 
 class SheetsConfig(BaseModel):
     spreadsheet_title: str
+    spreadsheet_id: str = ""
     service_account_key: str
 
 
